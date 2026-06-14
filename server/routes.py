@@ -1,7 +1,9 @@
 import logging
 import json
 
-from fastapi import APIRouter, Depends, HTTPException, status
+import cv2
+import numpy as np
+from fastapi import APIRouter, Depends, HTTPException, status, UploadFile, File
 from sqlalchemy.orm import Session
 from sse_starlette.sse import EventSourceResponse
 
@@ -14,6 +16,16 @@ from .schemas import (
 from .auth import create_access_token, hash_password, verify_password, require_auth
 from .crypto import encrypt, decrypt
 from .broadcaster import broadcaster
+from .emoji_mapper import emotion_to_emoji
+from emotion_detector import get_current_emotion
+
+
+def decrypt_safe(blob: str) -> str:
+    try:
+        return decrypt(blob)
+    except Exception as exc:
+        log.warning('Failed to decrypt message blob: %s', exc)
+        return ''
 
 
 log = logging.getLogger(__name__)
@@ -37,23 +49,51 @@ def login(body: LoginRequest, db: Session = Depends(get_db)):
     return TokenResponse(access_token=create_access_token(user.username))
 
 
+@router.post("/detect-emotion")
+async def detect_emotion(
+    frame: UploadFile | None = File(default=None),
+    username: str = Depends(require_auth),
+):
+    """
+    Detect user's emotion from an uploaded browser camera frame.
+    If no frame is supplied, falls back to the server camera.
+    """
+    try:
+        if frame is None:
+            emotion = get_current_emotion()
+        else:
+            data = await frame.read()
+            image = np.frombuffer(data, np.uint8)
+            frame_img = cv2.imdecode(image, cv2.IMREAD_COLOR)
+            if frame_img is None:
+                raise ValueError("Could not decode uploaded image")
+            emotion = get_current_emotion(frame_img)
+
+        emoji = emotion_to_emoji(emotion)
+        return {"emotion": emotion, "emoji": emoji}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Emotion detection failed: {str(e)}")
+
+
 @router.post("/messages", response_model=MessageResponse, status_code=status.HTTP_201_CREATED)
 async def send_message(
     body: SendMessageRequest,
     db: Session = Depends(get_db),
     username: str = Depends(require_auth),
 ):
+    if not body.content and not body.emoji:
+        raise HTTPException(status_code=400, detail="message must include text or emoji")
     if not db.query(User).filter(User.username == body.recipient).first():
         raise HTTPException(status_code=404, detail="recipient not found")
 
-    msg = Message(sender=username, recipient=body.recipient, ciphertext=encrypt(body.content))
+    msg = Message(sender=username, recipient=body.recipient, ciphertext=encrypt(body.content), emoji=body.emoji)
     db.add(msg)
     db.commit()
     db.refresh(msg)
 
     response = MessageResponse(
         id=msg.id, sender=msg.sender, recipient=msg.recipient,
-        content=body.content, created_at=msg.created_at, is_read=False,
+        content=body.content, emoji=msg.emoji, created_at=msg.created_at, is_read=False,
     )
     # Broadcast the decrypted message to both sender and recipient
     broadcast_data = response.model_dump(mode="json")
@@ -83,7 +123,7 @@ def get_messages(db: Session = Depends(get_db), username: str = Depends(require_
     return [
         MessageResponse(
             id=m.id, sender=m.sender, recipient=m.recipient,
-            content=decrypt(m.ciphertext), created_at=m.created_at, is_read=m.is_read,
+            content=decrypt_safe(m.ciphertext), emoji=m.emoji, created_at=m.created_at, is_read=m.is_read,
         )
         for m in messages
     ]

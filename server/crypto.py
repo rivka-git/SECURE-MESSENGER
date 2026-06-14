@@ -31,12 +31,34 @@ WHY A FRESH NONCE EVERY TIME?
 
 import os
 import base64
+from pathlib import Path
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
 
-# 32 bytes = 256-bit key. os.urandom is cryptographically secure.
-# In production: load this from an environment variable, never hardcode it.
-_KEY: bytes = os.urandom(32)
+# 32 bytes = 256-bit key.
+# Prefer a persistent key so messages remain decryptable across restarts.
+# Load from environment variable `MESSENGER_KEY` (base64), else from
+# ./messenger.key (base64). If neither exists, generate and save a key.
+_KEY_PATH = Path(__file__).parent.parent / "messenger.key"
+_KEY_B64 = os.getenv("MESSENGER_KEY")
+if _KEY_B64:
+  try:
+    _KEY = base64.b64decode(_KEY_B64)
+  except Exception:
+    # fallback to random key if env var malformed
+    _KEY = os.urandom(32)
+elif _KEY_PATH.exists():
+  try:
+    _KEY = base64.b64decode(_KEY_PATH.read_text())
+  except Exception:
+    _KEY = os.urandom(32)
+else:
+  _KEY = os.urandom(32)
+  try:
+    _KEY_PATH.write_text(base64.b64encode(_KEY).decode())
+  except Exception:
+    # ignore write failures (e.g., permissions)
+    pass
 
 
 def encrypt(plaintext: str) -> str:

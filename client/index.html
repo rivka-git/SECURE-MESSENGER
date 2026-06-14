@@ -298,7 +298,7 @@
     background: #202c33;
     padding: 10px 16px;
     gap: 10px;
-    align-items: center;
+    align-items: flex-end;
     border-top: 1px solid #2a3942;
   }
   #message-input {
@@ -314,6 +314,87 @@
     max-height: 120px;
     line-height: 1.4;
   }
+  #emotion-btn {
+    width: 44px; height: 44px;
+    border-radius: 50%;
+    background: #654321;
+    border: none;
+    color: #fff;
+    font-size: 20px;
+    cursor: pointer;
+    display: flex; align-items: center; justify-content: center;
+    flex-shrink: 0;
+    transition: background .2s;
+    title: "הוסף אימוגי לפי פנים";
+  }
+  #emotion-btn:hover { background: #8b5a3c; }
+  #emotion-btn.detecting { background: #d4af37; }
+  #selected-emoji {
+    font-size: 24px;
+    min-width: 44px;
+    text-align: center;
+    opacity: 0;
+    transition: opacity .2s;
+  }
+  #selected-emoji.active { opacity: 1; }
+
+  #camera-modal-overlay {
+    display: none;
+    position: fixed;
+    inset: 0;
+    background: rgba(0, 0, 0, 0.72);
+    z-index: 200;
+    align-items: center;
+    justify-content: center;
+  }
+  #camera-modal {
+    background: #202c33;
+    border-radius: 16px;
+    padding: 16px;
+    width: min(92vw, 420px);
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+    position: relative;
+  }
+  #camera-modal video {
+    width: 100%;
+    border-radius: 14px;
+    background: #000;
+  }
+  #camera-emoji-overlay {
+    position: absolute;
+    top: 16px;
+    left: 50%;
+    transform: translateX(-50%);
+    font-size: 64px;
+    pointer-events: none;
+    text-shadow: 0 0 12px rgba(0,0,0,0.7);
+    opacity: 0.9;
+  }
+  #camera-modal p {
+    color: #e9edef;
+    font-size: 14px;
+    text-align: center;
+    line-height: 1.4;
+  }
+  .camera-modal-btns {
+    display: flex;
+    gap: 10px;
+  }
+  .camera-modal-btns button {
+    flex: 1;
+    border: none;
+    border-radius: 12px;
+    padding: 10px 12px;
+    cursor: pointer;
+    font-size: 14px;
+    font-weight: 600;
+  }
+  #camera-capture-btn { background: #00a884; color: #fff; }
+  #camera-close-btn { background: #2a3942; color: #e9edef; }
+  #camera-status { color: #8696a0; font-size: 13px; text-align: center; min-height: 20px; }
+
   #send-btn {
     width: 44px; height: 44px;
     border-radius: 50%;
@@ -504,8 +585,23 @@
     </div>
     <div id="messages-container" style="display:none"></div>
     <div id="input-area">
-      <textarea id="message-input" rows="1" placeholder="הקלד הודעה..."></textarea>
+      <textarea id="message-input" rows="1" placeholder="הקלד הודעה... או שלח אימוג'י" ></textarea>
+      <button id="emotion-btn" title="הוסף אימוגי לפי פנים">🎭</button>
+      <div id="selected-emoji"></div>
       <button id="send-btn">➤</button>
+    </div>
+  </div>
+</div>
+
+<div id="camera-modal-overlay">
+  <div id="camera-modal">
+    <div id="camera-emoji-overlay"></div>
+    <video id="camera-video" autoplay muted playsinline></video>
+    <p>המצלמה פועלת בזמן זיהוי הרגש. לחץ על "זהה רגש" כדי לשלוח את התמונה לשרת.</p>
+    <div id="camera-status"></div>
+    <div class="camera-modal-btns">
+      <button id="camera-capture-btn">זהה רגש</button>
+      <button id="camera-close-btn">סגור</button>
     </div>
   </div>
 </div>
@@ -547,7 +643,9 @@ let token = null;
 let currentUser = null;
 let currentChat = null;
 let eventSource = null;
-// { username: [{ id, sender, recipient, content, created_at }] }
+let selectedEmoji = null;  // Store detected emoji
+let cameraStream = null;
+// { username: [{ id, sender, recipient, content, emoji, created_at }] }
 const conversations = {};
 
 // ─── UTILS ───
@@ -626,44 +724,62 @@ async function loadHistory() {
 // ─── SSE with auth header via fetch+ReadableStream ───
 // EventSource doesn't support headers, so we use fetch for SSE
 async function startSSE() {
-  const response = await fetch(`${API}/stream`, {
-    headers: { Authorization: `Bearer ${token}` },
-  });
-  const reader = response.body.getReader();
-  const decoder = new TextDecoder();
-  let buffer = '';
+  try {
+    const response = await fetch(`${API}/stream`, {
+      headers: { Authorization: `Bearer ${token}` },
+    });
+    if (!response.ok) {
+      console.error('SSE failed to connect:', response.status, await response.text());
+      return;
+    }
 
-  while (true) {
-    const { done, value } = await reader.read();
-    if (done) break;
-    buffer += decoder.decode(value, { stream: true });
-    const lines = buffer.split('\n');
-    buffer = lines.pop();
-    for (const line of lines) {
-      if (line.startsWith('data:')) {
-        const raw = line.slice(5).trim();
-        try {
-          const msg = JSON.parse(raw);
-          if (msg.type === 'read') {
-            const other = msg.sender === currentUser ? msg.recipient : msg.sender;
-            const conv = conversations[other] || [];
-            conv.forEach(m => { if (m.id === msg.message_id) m.is_read = true; });
-            if (currentChat === other) renderMessages(currentChat);
-            continue;
+    const reader = response.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = '';
+
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) {
+        console.warn('SSE stream closed by server');
+        break;
+      }
+      buffer += decoder.decode(value, { stream: true });
+      const lines = buffer.split('\n');
+      buffer = lines.pop();
+      for (const line of lines) {
+        if (line.startsWith('data:')) {
+          const raw = line.slice(5).trim();
+          try {
+            const msg = JSON.parse(raw);
+            if (msg.type === 'read') {
+              const other = msg.sender === currentUser ? msg.recipient : msg.sender;
+              const conv = conversations[other] || [];
+              conv.forEach(m => { if (m.id === msg.message_id) m.is_read = true; });
+              if (currentChat === other) renderMessages(currentChat);
+              continue;
+            }
+            if (msg.sender === currentUser) continue;
+            addMessage(msg);
+            renderContacts();
+            if (currentChat === msg.sender && msg.recipient === currentUser && document.visibilityState === 'visible') {
+              fetch(`${API}/messages/${msg.id}/read`, { method: 'POST', headers: { Authorization: `Bearer ${token}` } });
+              msg.is_read = true;
+            }
+            if (currentChat === msg.sender || currentChat === msg.recipient) {
+              renderMessages(currentChat);
+            }
+          } catch (err) {
+            console.error('SSE data parse failed:', err, raw);
           }
-          if (msg.sender === currentUser) continue;
-          addMessage(msg);
-          renderContacts();
-          if (currentChat === msg.sender && msg.recipient === currentUser && document.visibilityState === 'visible') {
-            fetch(`${API}/messages/${msg.id}/read`, { method: 'POST', headers: { Authorization: `Bearer ${token}` } });
-            msg.is_read = true;
-          }
-          if (currentChat === msg.sender || currentChat === msg.recipient) {
-            renderMessages(currentChat);
-          }
-        } catch {}
+        }
       }
     }
+  } catch (err) {
+    console.error('SSE connection failed:', err);
+  } finally {
+    setTimeout(() => {
+      if (currentUser) startSSE();
+    }, 3000);
   }
 }
 
@@ -759,7 +875,9 @@ function renderMessages(name) {
     }
     let extra = '';
     if (msg._failed) extra = `<div class="msg-failed-label" onclick="retrySend('${msg.id}', '${escapeHtml(msg.content)}')">❌ לא נשלחה — לחץ לנסות שוב</div>`;
+    const emojiDisplay = msg.emoji ? `<div style="font-size: 28px; margin: 4px 0;">${msg.emoji}</div>` : '';
     bubble.innerHTML = `
+      ${emojiDisplay}
       <div>${escapeHtml(msg.content)}</div>
       <div class="msg-time">${fmtTime(msg.created_at)}${tick}</div>
       ${extra}
@@ -777,13 +895,20 @@ function escapeHtml(text) {
 async function sendMessage() {
   const input = $('message-input');
   const content = input.value.trim();
-  if (!content || !currentChat) return;
+  if (!currentChat) return;
+  if (!content && !selectedEmoji) return;
   input.value = '';
   input.style.height = 'auto';
 
+  // Store emoji before clearing
+  const emoji = selectedEmoji;
+  selectedEmoji = null;
+  $('selected-emoji').textContent = '';
+  $('selected-emoji').classList.remove('active');
+
   // Add a temporary pending bubble
   const tempId = 'tmp_' + Date.now();
-  const tempMsg = { id: tempId, sender: currentUser, recipient: currentChat, content, created_at: new Date().toISOString(), _pending: true };
+  const tempMsg = { id: tempId, sender: currentUser, recipient: currentChat, content, emoji: emoji, created_at: new Date().toISOString(), _pending: true };
   addMessage(tempMsg);
   renderMessages(currentChat);
   renderContacts();
@@ -792,7 +917,7 @@ async function sendMessage() {
     const r = await fetch(`${API}/messages`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
-      body: JSON.stringify({ content, recipient: currentChat }),
+      body: JSON.stringify({ content, recipient: currentChat, emoji: emoji }),
     });
     // Remove temp message
     const conv = conversations[currentChat];
@@ -822,6 +947,138 @@ function retrySend(tempId, content) {
   sendMessage();
 }
 
+// ─── EMOTION DETECTION ───
+async function openCameraPreview() {
+  const overlay = $('camera-modal-overlay');
+  const video = $('camera-video');
+  const status = $('camera-status');
+
+  if (cameraStream) {
+    overlay.style.display = 'flex';
+    $('camera-emoji-overlay').textContent = selectedEmoji || '';
+    status.textContent = 'המצלמה פעילה. לחץ על "זהה רגש" כדי לשלוח.';
+    return;
+  }
+
+  status.textContent = 'פותח מצלמה...';
+  try {
+    cameraStream = await navigator.mediaDevices.getUserMedia({ video: true, audio: false });
+    video.srcObject = cameraStream;
+    await video.play();
+    overlay.style.display = 'flex';
+    status.textContent = 'המצלמה פעילה. לחץ על "זהה רגש" כדי לשלוח.';
+  } catch (err) {
+    console.error('Camera open error:', err);
+    status.textContent = 'לא ניתן לגשת למצלמה. בדוק הרשאות.';
+    cameraStream = null;
+    throw err;
+  }
+}
+
+function closeCameraPreview() {
+  const overlay = $('camera-modal-overlay');
+  const video = $('camera-video');
+  overlay.style.display = 'none';
+  $('camera-emoji-overlay').textContent = '';
+  if (cameraStream) {
+    cameraStream.getTracks().forEach(track => track.stop());
+    cameraStream = null;
+  }
+  video.srcObject = null;
+}
+
+async function captureEmotionFromCamera() {
+  const status = $('camera-status');
+  const btn = $('camera-capture-btn');
+
+  if (!cameraStream) {
+    status.textContent = 'המצלמה לא פתוחה.';
+    return;
+  }
+
+  if (btn.dataset.sendPending === 'true') {
+    await sendCapturedEmoji();
+    return;
+  }
+
+  btn.disabled = true;
+  btn.textContent = '⏳';
+  status.textContent = 'שולח תמונה לניתוח...';
+
+  try {
+    const video = $('camera-video');
+    const canvas = document.createElement('canvas');
+    canvas.width = video.videoWidth || 640;
+    canvas.height = video.videoHeight || 480;
+    canvas.getContext('2d').drawImage(video, 0, 0, canvas.width, canvas.height);
+
+    const blob = await new Promise(resolve => canvas.toBlob(resolve, 'image/jpeg'));
+    const form = new FormData();
+    form.append('frame', blob, 'frame.jpg');
+
+    const r = await fetch(`${API}/detect-emotion`, {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${token}` },
+      body: form,
+    });
+
+    if (!r.ok) {
+      const errorText = await r.text();
+      throw new Error(errorText || 'שגיאה בזיהוי הרגש');
+    }
+
+    const data = await r.json();
+    selectedEmoji = data.emoji;
+    $('selected-emoji').textContent = selectedEmoji;
+    $('selected-emoji').classList.add('active');
+    $('camera-emoji-overlay').textContent = selectedEmoji;
+    status.textContent = `נמצא: ${data.emotion}`;
+    btn.textContent = 'שלח אימוג׳י';
+    btn.dataset.sendPending = 'true';
+  } catch (err) {
+    console.error('Emotion detection error:', err);
+    status.textContent = 'שגיאה בזיהוי הרגש. נסה שוב.';
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+async function sendCapturedEmoji() {
+  if (!currentChat) {
+    $('camera-status').textContent = 'בחר שיחה כדי לשלוח אימוג׳י.';
+    return;
+  }
+  $('camera-capture-btn').disabled = true;
+  $('camera-status').textContent = 'שולח אימוג׳י...';
+  try {
+    await sendMessage();
+    closeCameraPreview();
+    $('camera-capture-btn').textContent = 'זהה רגש';
+    $('camera-capture-btn').dataset.sendPending = 'false';
+  } catch (err) {
+    console.error('Send captured emoji error:', err);
+    $('camera-status').textContent = 'שגיאה בשליחת האימוג׳י.';
+  } finally {
+    $('camera-capture-btn').disabled = false;
+  }
+}
+
+async function detectEmotion() {
+  try {
+    await openCameraPreview();
+  } catch {
+    alert('לא ניתן לפתוח את המצלמה. בדוק הרשאות ודפדפן.');
+  }
+}
+
+async function maybeAutoSendEmoji() {
+  if (!selectedEmoji || !currentChat) return;
+  const maybeMessage = $('message-input').value.trim();
+  if (maybeMessage.length === 0) {
+    await sendMessage();
+  }
+}
+
 // ─── MARK AS READ WHEN TAB BECOMES VISIBLE ───
 document.addEventListener('visibilitychange', () => {
   if (document.visibilityState === 'visible' && currentChat) {
@@ -835,6 +1092,9 @@ document.addEventListener('visibilitychange', () => {
   }
 });
 
+$('emotion-btn').onclick = detectEmotion;
+$('camera-capture-btn').onclick = captureEmotionFromCamera;
+$('camera-close-btn').onclick = closeCameraPreview;
 $('send-btn').onclick = sendMessage;
 $('message-input').addEventListener('keydown', e => {
   if (e.key === 'Enter' && !e.shiftKey) {

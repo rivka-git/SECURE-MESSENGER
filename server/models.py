@@ -39,7 +39,7 @@ USEFUL REFERENCE:
 
 from datetime import datetime, timezone
 
-from sqlalchemy import create_engine, String, Text, DateTime, Integer, ForeignKey, Boolean
+from sqlalchemy import create_engine, String, Text, DateTime, Integer, ForeignKey, Boolean, text
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, sessionmaker
 
 
@@ -86,6 +86,7 @@ class Message(Base):
     sender: Mapped[str] = mapped_column(String, index=True, nullable=False)
     recipient: Mapped[str] = mapped_column(String, index=True, nullable=False)
     ciphertext: Mapped[str] = mapped_column(Text, nullable=False)
+    emoji: Mapped[str] = mapped_column(String, nullable=True)  # Optional emotion-based emoji
     created_at: Mapped[datetime] = mapped_column(DateTime, default=lambda: datetime.now(timezone.utc))
     is_read: Mapped[bool] = mapped_column(default=False, nullable=False)
 
@@ -121,5 +122,15 @@ class GroupMessageRead(Base):
 
 
 def create_tables():
-    """Creates all tables in the database if they don't exist yet."""
+    """Creates all tables in the database if they don't exist yet.
+
+    Also applies a simple schema upgrade for the existing messages table.
+    """
     Base.metadata.create_all(bind=engine)
+
+    with engine.connect() as conn:
+        result = conn.execute(text("PRAGMA table_info('messages')"))
+        existing_columns = [row[1] for row in result]
+        if 'emoji' not in existing_columns:
+            conn.execute(text("ALTER TABLE messages ADD COLUMN emoji VARCHAR"))
+            conn.commit()

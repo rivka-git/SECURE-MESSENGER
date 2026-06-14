@@ -23,7 +23,7 @@ WHY SEPARATE FROM MODELS?
 """
 
 from datetime import datetime
-from typing import List
+from typing import List, Optional
 from pydantic import BaseModel, Field
 
 
@@ -51,8 +51,9 @@ class TokenResponse(BaseModel):
 # ---------------------------------------------------------------------------
 
 class SendMessageRequest(BaseModel):
-    content:   str = Field(min_length=1, max_length=2000)
+    content:   str = Field("", min_length=0, max_length=2000)
     recipient: str = Field(min_length=3, max_length=50)
+    emoji:     Optional[str] = None  # Emotion-based emoji (e.g., "😊")
 
 
 class MessageResponse(BaseModel):
@@ -60,6 +61,7 @@ class MessageResponse(BaseModel):
     sender:     str
     recipient:  str
     content:    str
+    emoji:      Optional[str] = None
     created_at: datetime
     is_read:    bool = False
 
